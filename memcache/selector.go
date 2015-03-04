@@ -33,13 +33,35 @@ type ServerSelector interface {
 	// should be shared onto.
 	PickServer(key string) (net.Addr, error)
 	Each(func(net.Addr) error) error
+	HostNames() []string
+	Lock()
+	Unlock()
 }
 
 // ServerList is a simple ServerSelector. Its zero value is usable.
 type ServerList struct {
-	mu    sync.RWMutex
-	addrs []net.Addr
+	mu     sync.RWMutex
+	addrs  []net.Addr
+	saddrs []string
 }
+
+// staticAddr caches the Network() and String() values from any net.Addr.
+type staticAddr struct {
+	ntw, str string
+}
+
+func newStaticAddr(a net.Addr) net.Addr {
+	return &staticAddr{
+		ntw: a.Network(),
+		str: a.String(),
+	}
+}
+
+func (s *staticAddr) Network() string { return s.ntw }
+func (s *staticAddr) String() string  { return s.str }
+
+func (ss *ServerList) Lock()   { ss.mu.Lock(); return }
+func (ss *ServerList) Unlock() { ss.mu.Unlock(); return }
 
 // SetServers changes a ServerList's set of servers at runtime and is
 // safe for concurrent use by multiple goroutines.
@@ -52,25 +74,28 @@ type ServerList struct {
 // is returned, no changes are made to the ServerList.
 func (ss *ServerList) SetServers(servers ...string) error {
 	naddr := make([]net.Addr, len(servers))
+	saddr := make([]string, 0)
 	for i, server := range servers {
 		if strings.Contains(server, "/") {
 			addr, err := net.ResolveUnixAddr("unix", server)
 			if err != nil {
 				return err
 			}
-			naddr[i] = addr
+			naddr[i] = newStaticAddr(addr)
 		} else {
+			saddr = append(saddr, server)
 			tcpaddr, err := net.ResolveTCPAddr("tcp", server)
 			if err != nil {
 				return err
 			}
-			naddr[i] = tcpaddr
+			naddr[i] = newStaticAddr(tcpaddr)
 		}
 	}
 
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.addrs = naddr
+	ss.saddrs = saddr
 	return nil
 }
 
@@ -94,6 +119,10 @@ var keyBufPool = sync.Pool{
 		b := make([]byte, 256)
 		return &b
 	},
+}
+
+func (ss *ServerList) HostNames() []string {
+	return ss.saddrs
 }
 
 func (ss *ServerList) PickServer(key string) (net.Addr, error) {

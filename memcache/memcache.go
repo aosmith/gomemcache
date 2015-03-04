@@ -280,6 +280,7 @@ func (c *Client) getConn(addr net.Addr) (*conn, error) {
 	}
 	nc, err := c.dial(addr)
 	if err != nil {
+
 		return nil, err
 	}
 	cn = &conn{
@@ -299,7 +300,18 @@ func (c *Client) onItem(item *Item, fn func(*Client, *bufio.ReadWriter, *Item) e
 	}
 	cn, err := c.getConn(addr)
 	if err != nil {
-		return err
+		// This error could be a stale cache, let's refresh and try one more time.
+		servers := c.selector.HostNames()
+		ss := new(ServerList)
+		ss.SetServers(servers...)
+		c.selector.Lock()
+		c.lk.Lock()
+		defer c.lk.Unlock()
+		c = &Client{selector: ss}
+		cn, err = c.getConn(addr)
+		if err != nil {
+			return err
+		}
 	}
 	defer cn.condRelease(&err)
 	if err = fn(c, cn.rw, item); err != nil {
