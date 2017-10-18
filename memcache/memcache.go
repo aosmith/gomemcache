@@ -175,7 +175,7 @@ type Item struct {
 type conn struct {
 	nc   net.Conn
 	rw   *bufio.ReadWriter
-	addr net.Addr
+	addr string
 	c    *Client
 }
 
@@ -200,32 +200,32 @@ func (cn *conn) condRelease(err *error) {
 	}
 }
 
-func (c *Client) putFreeConn(addr net.Addr, cn *conn) {
+func (c *Client) putFreeConn(addr string, cn *conn) {
 	c.lk.Lock()
 	defer c.lk.Unlock()
 	if c.freeconn == nil {
 		c.freeconn = make(map[string][]*conn)
 	}
-	freelist := c.freeconn[addr.String()]
+	freelist := c.freeconn[addr]
 	if len(freelist) >= c.maxIdleConns() {
 		cn.nc.Close()
 		return
 	}
-	c.freeconn[addr.String()] = append(freelist, cn)
+	c.freeconn[addr] = append(freelist, cn)
 }
 
-func (c *Client) getFreeConn(addr net.Addr) (cn *conn, ok bool) {
+func (c *Client) getFreeConn(addr string) (cn *conn, ok bool) {
 	c.lk.Lock()
 	defer c.lk.Unlock()
 	if c.freeconn == nil {
 		return nil, false
 	}
-	freelist, ok := c.freeconn[addr.String()]
+	freelist, ok := c.freeconn[addr]
 	if !ok || len(freelist) == 0 {
 		return nil, false
 	}
 	cn = freelist[len(freelist)-1]
-	c.freeconn[addr.String()] = freelist[:len(freelist)-1]
+	c.freeconn[addr] = freelist[:len(freelist)-1]
 	return cn, true
 }
 
@@ -247,20 +247,20 @@ func (c *Client) maxIdleConns() int {
 // too long to connect to the desired host. This level of
 // detail can generally be ignored.
 type ConnectTimeoutError struct {
-	Addr net.Addr
+	Addr string
 }
 
 func (cte *ConnectTimeoutError) Error() string {
-	return "memcache: connect timeout to " + cte.Addr.String()
+	return "memcache: connect timeout to " + cte.Addr
 }
 
-func (c *Client) dial(addr net.Addr) (net.Conn, error) {
+func (c *Client) dial(addr string) (net.Conn, error) {
 	type connError struct {
 		cn  net.Conn
 		err error
 	}
 
-	nc, err := net.DialTimeout(addr.Network(), addr.String(), c.netTimeout())
+	nc, err := net.DialTimeout("tcp", addr, c.netTimeout())
 	if err == nil {
 		return nc, nil
 	}
@@ -272,7 +272,7 @@ func (c *Client) dial(addr net.Addr) (net.Conn, error) {
 	return nil, err
 }
 
-func (c *Client) getConn(addr net.Addr) (*conn, error) {
+func (c *Client) getConn(addr string) (*conn, error) {
 	cn, ok := c.getFreeConn(addr)
 	if ok {
 		cn.extendDeadline()
@@ -327,7 +327,7 @@ func (c *Client) FlushAll() error {
 // Get gets the item for the given key. ErrCacheMiss is returned for a
 // memcache cache miss. The key must be at most 250 bytes in length.
 func (c *Client) Get(key string) (item *Item, err error) {
-	err = c.withKeyAddr(key, func(addr net.Addr) error {
+	err = c.withKeyAddr(key, func(addr string) error {
 		return c.getFromAddr(addr, []string{key}, func(it *Item) { item = it })
 	})
 	if err == nil && item == nil {
@@ -341,12 +341,12 @@ func (c *Client) Get(key string) (item *Item, err error) {
 // into the future at which time the item will expire. ErrCacheMiss is returned if the
 // key is not in the cache. The key must be at most 250 bytes in length.
 func (c *Client) Touch(key string, seconds int32) (err error) {
-	return c.withKeyAddr(key, func(addr net.Addr) error {
+	return c.withKeyAddr(key, func(addr string) error {
 		return c.touchFromAddr(addr, []string{key}, seconds)
 	})
 }
 
-func (c *Client) withKeyAddr(key string, fn func(net.Addr) error) (err error) {
+func (c *Client) withKeyAddr(key string, fn func(string) error) (err error) {
 	if !legalKey(key) {
 		return ErrMalformedKey
 	}
@@ -357,7 +357,7 @@ func (c *Client) withKeyAddr(key string, fn func(net.Addr) error) (err error) {
 	return fn(addr)
 }
 
-func (c *Client) withAddrRw(addr net.Addr, fn func(*bufio.ReadWriter) error) (err error) {
+func (c *Client) withAddrRw(addr string, fn func(*bufio.ReadWriter) error) (err error) {
 	cn, err := c.getConn(addr)
 	if err != nil {
 		return err
@@ -367,12 +367,12 @@ func (c *Client) withAddrRw(addr net.Addr, fn func(*bufio.ReadWriter) error) (er
 }
 
 func (c *Client) withKeyRw(key string, fn func(*bufio.ReadWriter) error) error {
-	return c.withKeyAddr(key, func(addr net.Addr) error {
+	return c.withKeyAddr(key, func(addr string) error {
 		return c.withAddrRw(addr, fn)
 	})
 }
 
-func (c *Client) getFromAddr(addr net.Addr, keys []string, cb func(*Item)) error {
+func (c *Client) getFromAddr(addr string, keys []string, cb func(*Item)) error {
 	return c.withAddrRw(addr, func(rw *bufio.ReadWriter) error {
 		if _, err := fmt.Fprintf(rw, "gets %s\r\n", strings.Join(keys, " ")); err != nil {
 			return err
@@ -388,7 +388,7 @@ func (c *Client) getFromAddr(addr net.Addr, keys []string, cb func(*Item)) error
 }
 
 // flushAllFromAddr send the flush_all command to the given addr
-func (c *Client) flushAllFromAddr(addr net.Addr) error {
+func (c *Client) flushAllFromAddr(addr string) error {
 	return c.withAddrRw(addr, func(rw *bufio.ReadWriter) error {
 		if _, err := fmt.Fprintf(rw, "flush_all\r\n"); err != nil {
 			return err
@@ -410,7 +410,7 @@ func (c *Client) flushAllFromAddr(addr net.Addr) error {
 	})
 }
 
-func (c *Client) touchFromAddr(addr net.Addr, keys []string, expiration int32) error {
+func (c *Client) touchFromAddr(addr string, keys []string, expiration int32) error {
 	return c.withAddrRw(addr, func(rw *bufio.ReadWriter) error {
 		for _, key := range keys {
 			if _, err := fmt.Fprintf(rw, "touch %s %d\r\n", key, expiration); err != nil {
@@ -449,7 +449,7 @@ func (c *Client) GetMulti(keys []string) (map[string]*Item, error) {
 		m[it.Key] = it
 	}
 
-	keyMap := make(map[net.Addr][]string)
+	keyMap := make(map[string][]string)
 	for _, key := range keys {
 		if !legalKey(key) {
 			return nil, ErrMalformedKey
@@ -463,7 +463,7 @@ func (c *Client) GetMulti(keys []string) (map[string]*Item, error) {
 
 	ch := make(chan error, buffered)
 	for addr, keys := range keyMap {
-		go func(addr net.Addr, keys []string) {
+		go func(addr string, keys []string) {
 			ch <- c.getFromAddr(addr, keys, addItemToMap)
 		}(addr, keys)
 	}

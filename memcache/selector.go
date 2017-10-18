@@ -19,7 +19,6 @@ package memcache
 import (
 	"hash/crc32"
 	"net"
-	"strings"
 	"sync"
 )
 
@@ -31,8 +30,8 @@ import (
 type ServerSelector interface {
 	// PickServer returns the server address that a given item
 	// should be shared onto.
-	PickServer(key string) (net.Addr, error)
-	Each(func(net.Addr) error) error
+	PickServer(key string) (string, error)
+	Each(func(string) error) error
 	HostNames() []string
 	Lock()
 	Unlock()
@@ -41,7 +40,7 @@ type ServerSelector interface {
 // ServerList is a simple ServerSelector. Its zero value is usable.
 type ServerList struct {
 	mu     sync.RWMutex
-	addrs  []net.Addr
+	addrs  []string
 	saddrs []string
 }
 
@@ -73,34 +72,19 @@ func (ss *ServerList) Unlock() { ss.mu.Unlock(); return }
 // resolve. No attempt is made to connect to the server. If any error
 // is returned, no changes are made to the ServerList.
 func (ss *ServerList) SetServers(servers ...string) error {
-	naddr := make([]net.Addr, len(servers))
-	saddr := make([]string, 0)
+	naddr := make([]string, len(servers))
 	for i, server := range servers {
-		if strings.Contains(server, "/") {
-			addr, err := net.ResolveUnixAddr("unix", server)
-			if err != nil {
-				return err
-			}
-			naddr[i] = newStaticAddr(addr)
-		} else {
-			saddr = append(saddr, server)
-			tcpaddr, err := net.ResolveTCPAddr("tcp", server)
-			if err != nil {
-				return err
-			}
-			naddr[i] = newStaticAddr(tcpaddr)
-		}
+		naddr[i] = server
 	}
 
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.addrs = naddr
-	ss.saddrs = saddr
 	return nil
 }
 
 // Each iterates over each server calling the given function
-func (ss *ServerList) Each(f func(net.Addr) error) error {
+func (ss *ServerList) Each(f func(string) error) error {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
 	for _, a := range ss.addrs {
@@ -125,11 +109,11 @@ func (ss *ServerList) HostNames() []string {
 	return ss.saddrs
 }
 
-func (ss *ServerList) PickServer(key string) (net.Addr, error) {
+func (ss *ServerList) PickServer(key string) (string, error) {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
 	if len(ss.addrs) == 0 {
-		return nil, ErrNoServers
+		return "", ErrNoServers
 	}
 	if len(ss.addrs) == 1 {
 		return ss.addrs[0], nil
